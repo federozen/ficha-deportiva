@@ -1,0 +1,9 @@
+# Nunca subir la API key
+.streamlit/secrets.toml
+
+# Python
+__pycache__/
+*.pyc
+.env
+.venv/
+venv/
