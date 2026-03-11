@@ -456,7 +456,7 @@ with st.sidebar:
         api_key_input = ""
     else:
         api_key_input = st.text_input(
-            "", type="password", placeholder="sk-ant-api03-…",
+            "API Key de Anthropic", type="password", placeholder="sk-ant-api03-…",
             label_visibility="collapsed",
             help="Ingresá tu API key de Anthropic"
         )
