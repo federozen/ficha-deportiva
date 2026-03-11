@@ -26,6 +26,29 @@ HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 }
 
+# ── FECHA Y TEMPORADA VIGENTE ──────────────────────────────────────────────────
+def hoy() -> str:
+    return datetime.now().strftime("%d/%m/%Y")
+
+def año_actual() -> int:
+    return datetime.now().year
+
+def temporada_vigente() -> str:
+    """
+    Devuelve la temporada en curso según el mes del año.
+    - Ago–mayo: temporada europea en curso, ej. 2024/2025
+    - Jun–jul:  receso europeo; ligas sudamericanas activas
+    """
+    now   = datetime.now()
+    year  = now.year
+    month = now.month
+    if month >= 8:
+        return f"{year}/{year+1} (Europa) · {year} (Sudamérica)"
+    elif month <= 5:
+        return f"{year-1}/{year} (Europa) · {year} (Sudamérica)"
+    else:
+        return f"{year} (receso europeo · temporada sudamericana en curso)"
+
 # ── STYLES ─────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
@@ -254,7 +277,7 @@ def scrape_context(params: dict) -> tuple[str, list[str]]:
         wiki = wikipedia_summary(f"{name} futbolista", "es") or wikipedia_summary(name, "es")
         if wiki:
             parts.append(f"[WIKIPEDIA]\n{wiki[:600]}"); sources.append("Wikipedia")
-        snippets = ddg_snippets(f"{name} fútbol 2025 estadísticas noticias")
+        snippets = ddg_snippets(f"{name} fútbol {año_actual()} estadísticas noticias temporada")
         if snippets:
             parts.append("[NOTICIAS]\n" + "\n".join(f"• {s['title']}: {s['snippet']}" for s in snippets))
             sources.append("DuckDuckGo")
@@ -264,7 +287,7 @@ def scrape_context(params: dict) -> tuple[str, list[str]]:
         sf = sofascore_match(home, away)
         if sf:
             parts.append(f"[SOFASCORE PARTIDO]\n{sf}"); sources.append("Sofascore")
-        snippets = ddg_snippets(f"{home} vs {away} {comp} 2025 resultado")
+        snippets = ddg_snippets(f"{home} vs {away} {comp} {año_actual()} resultado")
         if snippets:
             parts.append("[NOTICIAS]\n" + "\n".join(f"• {s['title']}: {s['snippet']}" for s in snippets))
             sources.append("DuckDuckGo")
@@ -277,13 +300,13 @@ def scrape_context(params: dict) -> tuple[str, list[str]]:
         wiki = wikipedia_summary(f"{name} club de fútbol", "es")
         if wiki:
             parts.append(f"[WIKIPEDIA]\n{wiki[:600]}"); sources.append("Wikipedia")
-        snippets = ddg_snippets(f"{name} fútbol 2025 noticias")
+        snippets = ddg_snippets(f"{name} fútbol {año_actual()} noticias temporada")
         if snippets:
             parts.append("[NOTICIAS]\n" + "\n".join(f"• {s['title']}: {s['snippet']}" for s in snippets))
             sources.append("DuckDuckGo")
 
     elif tipo == "libre":
-        snippets = ddg_snippets(params.get("prompt", "") + " fútbol 2025")
+        snippets = ddg_snippets(params.get("prompt", "") + f" fútbol {año_actual()}")
         if snippets:
             parts.append("[BÚSQUEDA WEB]\n" + "\n".join(f"• {s['title']}: {s['snippet']}" for s in snippets))
             sources.append("DuckDuckGo")
@@ -327,18 +350,29 @@ FORMATS_TEAM = {
 
 
 def build_prompt(p: dict, scraped_ctx: str) -> tuple[str, str]:
+    fecha_hoy    = hoy()
+    temporada    = temporada_vigente()
+
     sys_prompt = (
         "Sos un periodista deportivo argentino senior con 20 años de experiencia. "
         "Escribís para medios de primer nivel. Tu prosa es precisa, atractiva y refleja "
         "profundo conocimiento del deporte. Usás español rioplatense de forma natural. "
         "Cuando tenés datos reales los integrás de forma natural en el texto; cuando no "
         "los tenés, escribís con criterio periodístico sin inventar estadísticas específicas. "
-        "El resultado siempre está listo para publicar, sin explicaciones ni meta-comentarios."
+        "El resultado siempre está listo para publicar, sin explicaciones ni meta-comentarios.\n\n"
+        f"CONTEXTO TEMPORAL (MUY IMPORTANTE):\n"
+        f"- Fecha de hoy: {fecha_hoy}\n"
+        f"- Temporada vigente: {temporada}\n"
+        f"- Todos los datos, estadísticas y referencias deben corresponder a la temporada "
+        f"en curso o al período más reciente disponible. No uses datos de temporadas anteriores "
+        f"salvo que sean necesarios como contexto histórico. Si los datos scrapeados son de "
+        f"temporadas pasadas, aclaralo en el texto."
     )
     ctx_parts = []
     if scraped_ctx.strip():
         ctx_parts.append(
-            f"DATOS REALES OBTENIDOS DE INTERNET (integrá los relevantes en el texto):\n{scraped_ctx}"
+            f"DATOS REALES OBTENIDOS DE INTERNET — {fecha_hoy} "
+            f"(integrá los relevantes; priorizá los más recientes):\n{scraped_ctx}"
         )
     manual = p.get("context", "").strip()
     if manual:
@@ -349,18 +383,21 @@ def build_prompt(p: dict, scraped_ctx: str) -> tuple[str, str]:
     if tipo == "jugador":
         user = (
             f"Generá {FORMATS_PLAYER.get(p['format'], p['format'])} "
-            f"sobre **{p['player']}**. Tono: {TONES.get(p['tone'], p['tone'])}."
+            f"sobre **{p['player']}**. Tono: {TONES.get(p['tone'], p['tone'])}. "
+            f"Enfocate en su estado actual y la temporada {temporada}."
         )
     elif tipo == "partido":
         score = f" (resultado: {p['score']})" if p.get("score") else ""
         user = (
             f"Generá {FORMATS_MATCH.get(p['format'], p['format'])} "
-            f"del partido **{p['home']} vs {p['away']}**{score} · {p['comp']}."
+            f"del partido **{p['home']} vs {p['away']}**{score} · {p['comp']}. "
+            f"Fecha de consulta: {fecha_hoy}."
         )
     elif tipo == "equipo":
         user = (
             f"Generá {FORMATS_TEAM.get(p['format'], p['format'])} "
-            f"sobre **{p['team']}**."
+            f"sobre **{p['team']}**. "
+            f"Enfocate en la temporada vigente ({temporada}) y el momento actual ({fecha_hoy})."
         )
     else:
         user = p.get("prompt", "")
