@@ -368,101 +368,32 @@ def _sofascore_team_id(name: str) -> tuple[int | None, dict]:
     return entity.get("id"), entity
 
 
-def sofascore_team_temporada(name: str) -> str:
-    """Temporada actual: stats, posición en tabla, últimos 5, próximos 5, entrenador."""
-    tid, t = _sofascore_team_id(name)
-    if not tid:
-        return ""
-
-    lines = [f"Equipo: {t.get('name', name)}"]
-    if t.get("country"):
-        lines.append(f"País: {t['country']['name']}")
-    if t.get("tournament"):
-        lines.append(f"Liga principal: {t['tournament']['name']}")
-
-    # Entrenador
-    manager_r = _get(f"https://api.sofascore.com/api/v1/team/{tid}/managers")
-    if manager_r:
-        managers = manager_r.json().get("managers", [])
-        if managers:
-            m = managers[0]
-            lines.append(f"Entrenador: {m.get('name', '?')}")
-            if m.get("country"):
-                lines.append(f"Nacionalidad DT: {m['country']['name']}")
-
-    # Últimos 5 partidos con fechas y resultado
-    last_r = _get(f"https://api.sofascore.com/api/v1/team/{tid}/events/last/0")
-    if last_r:
-        events = last_r.json().get("events", [])[:5]
-        if events:
-            lines.append("\n— Últimos 5 partidos —")
-            for ev in reversed(events):  # cronológico
-                home_t = ev.get("homeTeam", {}).get("name", "?")
-                away_t = ev.get("awayTeam", {}).get("name", "?")
-                hs     = ev.get("homeScore", {}).get("current", "?")
-                as_    = ev.get("awayScore", {}).get("current", "?")
-                ts     = ev.get("startTimestamp")
-                fecha  = datetime.fromtimestamp(ts).strftime("%d/%m/%Y") if ts else "?"
-                comp   = ev.get("tournament", {}).get("name", "")
-                # Determinar W/D/L desde perspectiva del equipo consultado
-                is_home = home_t == t.get("name", name) or name.lower() in home_t.lower()
-                try:
-                    hs_n, as_n = int(hs), int(as_)
-                    if is_home:
-                        wdl = "✓ G" if hs_n > as_n else ("= E" if hs_n == as_n else "✗ P")
-                    else:
-                        wdl = "✓ G" if as_n > hs_n else ("= E" if hs_n == as_n else "✗ P")
-                except Exception:
-                    wdl = ""
-                lines.append(f"{fecha} [{wdl}] {home_t} {hs}-{as_} {away_t}  ({comp})")
-
-    # Próximos 5 partidos
-    next_r = _get(f"https://api.sofascore.com/api/v1/team/{tid}/events/next/0")
-    if next_r:
-        upcoming = next_r.json().get("events", [])[:5]
-        if upcoming:
-            lines.append("\n— Próximos 5 partidos —")
-            for ev in upcoming:
-                home_t = ev.get("homeTeam", {}).get("name", "?")
-                away_t = ev.get("awayTeam", {}).get("name", "?")
-                ts     = ev.get("startTimestamp")
-                fecha  = datetime.fromtimestamp(ts).strftime("%d/%m/%Y %H:%M") if ts else "?"
-                comp   = ev.get("tournament", {}).get("name", "")
-                lines.append(f"{fecha}: {home_t} vs {away_t}  ({comp})")
-
-    # Stats de temporada del equipo
-    season_r = _get(f"https://api.sofascore.com/api/v1/team/{tid}/statistics/season/total")
-    if not season_r:
-        # Fallback: buscar via tournaments
-        pass
-    else:
-        stats = season_r.json()
-        if stats:
-            lines.append("\n— Estadísticas de temporada —")
-            for key, label in [
-                ("wins", "Victorias"), ("draws", "Empates"), ("losses", "Derrotas"),
-                ("goalsScored", "Goles a favor"), ("goalsConceded", "Goles en contra"),
-                ("avgGoalsScored", "Promedio goles/partido"),
-                ("cleanSheets", "Vallas invictas"),
-            ]:
-                if stats.get(key) is not None:
-                    lines.append(f"{label}: {stats[key]}")
-
-    return "\n".join(lines)
+def _thesportsdb_team(name: str) -> dict:
+    """TheSportsDB — API gratuita, sin key. Datos históricos del club."""
+    r = _get(f"https://www.thesportsdb.com/api/v1/json/3/searchteams.php?t={urllib.parse.quote_plus(name)}")
+    if not r:
+        return {}
+    teams = r.json().get("teams") or []
+    return teams[0] if teams else {}
 
 
-def sofascore_team_resultados(name: str) -> str:
-    """Solo últimos 5 resultados con detalle."""
-    tid, t = _sofascore_team_id(name)
-    if not tid:
-        return ""
-    lines = [f"Equipo: {t.get('name', name)}"]
-    last_r = _get(f"https://api.sofascore.com/api/v1/team/{tid}/events/last/0")
-    if not last_r:
-        return "\n".join(lines)
-    events = last_r.json().get("events", [])[:5]
-    lines.append("\n— Últimos 5 resultados —")
-    for ev in reversed(events):
+def _thesportsdb_team_events(tsdb_id: str) -> tuple[list, list]:
+    """Últimos y próximos eventos de TheSportsDB."""
+    last, nxt = [], []
+    r_last = _get(f"https://www.thesportsdb.com/api/v1/json/3/eventslast.php?id={tsdb_id}")
+    if r_last:
+        last = (r_last.json().get("results") or [])[:5]
+    r_next = _get(f"https://www.thesportsdb.com/api/v1/json/3/eventsnext.php?id={tsdb_id}")
+    if r_next:
+        nxt = (r_next.json().get("events") or [])[:5]
+    return last, nxt
+
+
+def _format_events_sofascore(events: list, team_name: str, mode: str = "last") -> list[str]:
+    """Convierte eventos de Sofascore a líneas de datos duros."""
+    lines = []
+    iterable = reversed(events) if mode == "last" else events
+    for ev in iterable:
         home_t = ev.get("homeTeam", {}).get("name", "?")
         away_t = ev.get("awayTeam", {}).get("name", "?")
         hs     = ev.get("homeScore", {}).get("current", "?")
@@ -470,28 +401,127 @@ def sofascore_team_resultados(name: str) -> str:
         ts     = ev.get("startTimestamp")
         fecha  = datetime.fromtimestamp(ts).strftime("%d/%m/%Y") if ts else "?"
         comp   = ev.get("tournament", {}).get("name", "")
-        lines.append(f"{fecha}: {home_t} {hs}-{as_} {away_t}  ({comp})")
-    return "\n".join(lines)
+        if mode == "last":
+            # W/D/L desde perspectiva del equipo
+            is_home = team_name.lower() in home_t.lower()
+            try:
+                hs_n, as_n = int(hs), int(as_)
+                wdl = ("G" if (is_home and hs_n > as_n) or (not is_home and as_n > hs_n)
+                       else ("E" if hs_n == as_n else "P"))
+            except Exception:
+                wdl = "-"
+            lines.append(f"{fecha} | {wdl} | {home_t} {hs}-{as_} {away_t} | {comp}")
+        else:
+            hora = datetime.fromtimestamp(ts).strftime("%H:%M") if ts else ""
+            lines.append(f"{fecha} {hora} | {home_t} vs {away_t} | {comp}")
+    return lines
 
 
-def sofascore_team_proximos(name: str) -> str:
-    """Solo próximos 5 partidos."""
+def _format_events_tsdb(events: list, mode: str = "last") -> list[str]:
+    """Convierte eventos de TheSportsDB a líneas de datos duros."""
+    lines = []
+    for ev in events:
+        fecha  = ev.get("dateEvent", "?")
+        hora   = ev.get("strTime", "")
+        home_t = ev.get("strHomeTeam", "?")
+        away_t = ev.get("strAwayTeam", "?")
+        comp   = ev.get("strLeague", "")
+        if mode == "last":
+            hs  = ev.get("intHomeScore", "?")
+            as_ = ev.get("intAwayScore", "?")
+            lines.append(f"{fecha} | {home_t} {hs}-{as_} {away_t} | {comp}")
+        else:
+            lines.append(f"{fecha} {hora} | {home_t} vs {away_t} | {comp}")
+    return lines
+
+
+def sofascore_team_temporada(name: str) -> str:
+    """
+    Datos duros de la temporada actual.
+    Fuente primaria: Sofascore. Fallback: TheSportsDB.
+    Solo devuelve lo que realmente encuentra — sin inventar nada.
+    """
+    lines = []
+    team_display = name
     tid, t = _sofascore_team_id(name)
-    if not tid:
-        return ""
-    lines = [f"Equipo: {t.get('name', name)}"]
-    next_r = _get(f"https://api.sofascore.com/api/v1/team/{tid}/events/next/0")
-    if not next_r:
-        return "\n".join(lines)
-    upcoming = next_r.json().get("events", [])[:5]
-    lines.append("\n— Próximos 5 partidos —")
-    for ev in upcoming:
-        home_t = ev.get("homeTeam", {}).get("name", "?")
-        away_t = ev.get("awayTeam", {}).get("name", "?")
-        ts     = ev.get("startTimestamp")
-        fecha  = datetime.fromtimestamp(ts).strftime("%d/%m/%Y %H:%M") if ts else "?"
-        comp   = ev.get("tournament", {}).get("name", "")
-        lines.append(f"{fecha}: {home_t} vs {away_t}  ({comp})")
+
+    # ── Sofascore ──
+    sf_last, sf_next = [], []
+    if tid:
+        team_display = t.get("name", name)
+        lines.append(f"Equipo: {team_display}")
+        if t.get("country"):
+            lines.append(f"País: {t['country']['name']}")
+        if t.get("tournament"):
+            lines.append(f"Liga: {t['tournament']['name']}")
+
+        # Entrenador
+        mgr_r = _get(f"https://api.sofascore.com/api/v1/team/{tid}/managers")
+        if mgr_r:
+            mgrs = mgr_r.json().get("managers", [])
+            if mgrs:
+                lines.append(f"Entrenador: {mgrs[0].get('name','?')}")
+
+        # Posición en tabla (standings)
+        stand_r = _get(f"https://api.sofascore.com/api/v1/team/{tid}/standings/last")
+        if stand_r:
+            standings = stand_r.json().get("standings", [])
+            for sg in standings[:1]:
+                for row in sg.get("rows", []):
+                    if row.get("team", {}).get("id") == tid:
+                        p = row
+                        lines.append(
+                            f"\n— Posición en tabla ({sg.get('name','Liga')}) —\n"
+                            f"Posición: {p.get('position','?')} | "
+                            f"PJ: {p.get('matches','?')} | "
+                            f"G: {p.get('wins','?')} E: {p.get('draws','?')} P: {p.get('losses','?')} | "
+                            f"GF: {p.get('scoresFor','?')} GC: {p.get('scoresAgainst','?')} | "
+                            f"Pts: {p.get('points','?')}"
+                        )
+                        break
+
+        # Últimos 5
+        last_r = _get(f"https://api.sofascore.com/api/v1/team/{tid}/events/last/0")
+        if last_r:
+            sf_last = last_r.json().get("events", [])[:5]
+
+        # Próximos 5
+        next_r = _get(f"https://api.sofascore.com/api/v1/team/{tid}/events/next/0")
+        if next_r:
+            sf_next = next_r.json().get("events", [])[:5]
+
+    # ── TheSportsDB fallback / complemento ──
+    tsdb = _thesportsdb_team(name)
+    tsdb_last, tsdb_next = [], []
+    if tsdb:
+        if not lines:  # Sofascore no encontró nada
+            lines.append(f"Equipo: {tsdb.get('strTeam', name)}")
+            if tsdb.get("strCountry"):
+                lines.append(f"País: {tsdb['strCountry']}")
+            if tsdb.get("strLeague"):
+                lines.append(f"Liga: {tsdb['strLeague']}")
+            if tsdb.get("strManager"):
+                lines.append(f"Entrenador: {tsdb['strManager']}")
+        tsdb_id = tsdb.get("idTeam", "")
+        if tsdb_id:
+            tsdb_last, tsdb_next = _thesportsdb_team_events(tsdb_id)
+
+    # ── Armar sección últimos 5 ──
+    last_lines = _format_events_sofascore(sf_last, team_display) if sf_last else _format_events_tsdb(tsdb_last)
+    if last_lines:
+        lines.append("\n— Últimos 5 partidos (fecha | resultado | rival | competencia) —")
+        lines.extend(last_lines)
+    else:
+        lines.append("\n[Sin datos de últimos partidos disponibles]")
+
+    # ── Armar sección próximos 5 ──
+    next_lines = _format_events_sofascore(sf_next, team_display, "next") if sf_next else _format_events_tsdb(tsdb_next, "next")
+    if next_lines:
+        lines.append("\n— Próximos 5 partidos (fecha | hora | rival | competencia) —")
+        lines.extend(next_lines)
+    else:
+        lines.append("\n[Sin datos de próximos partidos disponibles]")
+
     return "\n".join(lines)
 
 
@@ -499,54 +529,79 @@ def sofascore_coach(name: str) -> tuple[str, str]:
     """Devuelve (nombre_entrenador, manager_id) del equipo."""
     tid, _ = _sofascore_team_id(name)
     if not tid:
+        # Fallback TheSportsDB
+        tsdb = _thesportsdb_team(name)
+        return tsdb.get("strManager", ""), ""
+    mgr_r = _get(f"https://api.sofascore.com/api/v1/team/{tid}/managers")
+    if not mgr_r:
         return "", ""
-    manager_r = _get(f"https://api.sofascore.com/api/v1/team/{tid}/managers")
-    if not manager_r:
-        return "", ""
-    managers = manager_r.json().get("managers", [])
+    managers = mgr_r.json().get("managers", [])
     if not managers:
         return "", ""
     m = managers[0]
     return m.get("name", ""), str(m.get("id", ""))
 
 
-def sofascore_coach_historico(coach_name: str, coach_id: str) -> str:
-    """Historial del entrenador: clubes dirigidos, títulos."""
-    if not coach_id:
+def sofascore_coach_historico(coach_name: str, coach_id: str, team_name: str = "") -> str:
+    """
+    Historial del entrenador: clubes dirigidos, títulos.
+    Fuente: Sofascore + TheSportsDB + Wikipedia.
+    Solo datos duros verificados.
+    """
+    if not coach_name:
         return ""
     lines = [f"Entrenador: {coach_name}"]
 
-    # Info básica
-    info_r = _get(f"https://api.sofascore.com/api/v1/manager/{coach_id}")
-    if info_r:
-        data = info_r.json().get("manager", {})
-        if data.get("country"):
-            lines.append(f"Nacionalidad: {data['country']['name']}")
-        if data.get("dateOfBirthTimestamp"):
-            dob = date.fromtimestamp(data["dateOfBirthTimestamp"])
-            age = (date.today() - dob).days // 365
-            lines.append(f"Edad: {age} años")
+    if coach_id:
+        # Info básica Sofascore
+        info_r = _get(f"https://api.sofascore.com/api/v1/manager/{coach_id}")
+        if info_r:
+            data = info_r.json().get("manager", {})
+            if data.get("country"):
+                lines.append(f"Nacionalidad: {data['country']['name']}")
+            if data.get("dateOfBirthTimestamp"):
+                dob = date.fromtimestamp(data["dateOfBirthTimestamp"])
+                age = (date.today() - dob).days // 365
+                lines.append(f"Edad: {age} años ({dob})")
 
-    # Historial de equipos dirigidos
-    history_r = _get(f"https://api.sofascore.com/api/v1/manager/{coach_id}/history")
-    if history_r:
-        history = history_r.json().get("managerHistory", [])
-        if history:
-            lines.append("\n— Equipos dirigidos —")
-            for h in history[:10]:
-                club  = h.get("team", {}).get("name", "?")
-                desde = datetime.fromtimestamp(h["startTimestamp"]).strftime("%Y") if h.get("startTimestamp") else "?"
-                hasta = datetime.fromtimestamp(h["endTimestamp"]).strftime("%Y") if h.get("endTimestamp") else "presente"
-                lines.append(f"{desde}–{hasta}: {club}")
+        # Historial de clubes
+        hist_r = _get(f"https://api.sofascore.com/api/v1/manager/{coach_id}/history")
+        if hist_r:
+            history = hist_r.json().get("managerHistory", [])
+            if history:
+                lines.append("\n— Clubes dirigidos —")
+                for h in history[:12]:
+                    club  = h.get("team", {}).get("name", "?")
+                    desde = datetime.fromtimestamp(h["startTimestamp"]).strftime("%d/%m/%Y") if h.get("startTimestamp") else "?"
+                    hasta = datetime.fromtimestamp(h["endTimestamp"]).strftime("%d/%m/%Y") if h.get("endTimestamp") else "presente"
+                    lines.append(f"{desde} → {hasta}: {club}")
 
-    # Títulos del DT
-    honors_r = _get(f"https://api.sofascore.com/api/v1/manager/{coach_id}/honors")
-    if honors_r:
-        honors = honors_r.json().get("honors", [])
-        if honors:
-            lines.append("\n— Títulos como entrenador —")
-            for h in honors[:8]:
-                lines.append(f"• {h.get('honor',{}).get('name','?')} ({', '.join(h.get('seasons',[])[:3])})")
+        # Títulos
+        hon_r = _get(f"https://api.sofascore.com/api/v1/manager/{coach_id}/honors")
+        if hon_r:
+            honors = hon_r.json().get("honors", [])
+            if honors:
+                lines.append("\n— Títulos como entrenador —")
+                for h in honors[:10]:
+                    title   = h.get("honor", {}).get("name", "?")
+                    seasons = ", ".join(h.get("seasons", [])[:4])
+                    count   = len(h.get("seasons", []))
+                    lines.append(f"• {title} x{count}: {seasons}")
+
+    # TheSportsDB fallback para manager
+    tsdb_mgr_r = _get(f"https://www.thesportsdb.com/api/v1/json/3/searchmanagers.php?m={urllib.parse.quote_plus(coach_name)}")
+    if tsdb_mgr_r:
+        managers = tsdb_mgr_r.json().get("managers") or []
+        if managers:
+            m = managers[0]
+            if not coach_id:  # Si Sofascore no encontró nada, usar TheSportsDB
+                if m.get("strNationality"):
+                    lines.append(f"Nacionalidad: {m['strNationality']}")
+                if m.get("dateBorn"):
+                    lines.append(f"Nacimiento: {m['dateBorn']}")
+            if m.get("strDescriptionEN") and len(lines) < 5:
+                # Solo si tenemos muy poca info
+                lines.append(f"\nBiografía (TheSportsDB): {m['strDescriptionEN'][:400]}")
 
     return "\n".join(lines)
 
@@ -654,7 +709,7 @@ def scrape_context(params: dict) -> tuple[str, list[str]]:
         if fmt in ("entrenador", "dt_historico"):
             coach_name, coach_id = sofascore_coach(name)
             if coach_name:
-                hist = sofascore_coach_historico(coach_name, coach_id)
+                hist = sofascore_coach_historico(coach_name, coach_id, name)
                 if hist:
                     parts.append(f"[SOFASCORE — ENTRENADOR]\n{hist}"); sources.append("Sofascore DT")
             # Wikipedia del entrenador
