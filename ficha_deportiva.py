@@ -96,9 +96,66 @@ def get_api_key(user_input: str) -> str:
         return st.secrets["ANTHROPIC_API_KEY"]
     return user_input.strip()
 
-# ══════════════════════════════════════════════════════════════════════════════
-# SCRAPING ENGINE
-# ══════════════════════════════════════════════════════════════════════════════
+
+def get_tavily_key(user_input: str) -> str:
+    if st.secrets.get("TAVILY_API_KEY"):
+        return st.secrets["TAVILY_API_KEY"]
+    return user_input.strip()
+
+
+# Dominios de estadísticas deportivas verificadas — sin noticias, sin opinión
+TAVILY_STATS_DOMAINS = [
+    "sofascore.com",
+    "fbref.com",
+    "transfermarkt.com",
+    "transfermarkt.es",
+    "soccerstats.com",
+    "whoscored.com",
+    "fotmob.com",
+    "livescore.com",
+    "soccerway.com",
+    "flashscore.com",
+    "resultados-futbol.com",
+    "bdfa.com.ar",           # Base de datos fútbol argentino
+    "promiedos.com.ar",      # Tabla y stats Liga Argentina
+    "livefutbol.com",
+    "stats.com",
+    "espn.com/soccer",
+    "espndeportes.espn.com",
+]
+
+
+def tavily_search(query: str, tavily_key: str, max_results: int = 4) -> str:
+    """
+    Busca estadísticas deportivas via Tavily.
+    Restringido a dominios de stats verificadas — sin noticias.
+    """
+    if not tavily_key:
+        return ""
+    try:
+        from tavily import TavilyClient
+        client = TavilyClient(api_key=tavily_key)
+        resp = client.search(
+            query=query,
+            search_depth="advanced",
+            include_domains=TAVILY_STATS_DOMAINS,
+            max_results=max_results,
+            include_answer=True,
+        )
+        lines = []
+        if resp.get("answer"):
+            lines.append(f"[Tavily síntesis]\n{resp['answer']}")
+        for res in resp.get("results", [])[:max_results]:
+            domain  = res.get("url", "").split("/")[2] if res.get("url") else ""
+            content = (res.get("content") or "").strip()
+            title   = res.get("title", "")
+            if content:
+                lines.append(f"[{domain}] {title}\n{content[:350]}")
+        return "\n\n".join(lines)
+    except Exception:
+        return ""
+
+
 
 def _get(url: str, timeout: int = 8):
     try:
@@ -649,6 +706,7 @@ def tm_coach_profile(name: str) -> str:
     return "\n".join(lines)
 
 
+def _sofascore_team_id(name: str) -> tuple[int | None, dict]:
     """
     Busca el equipo en Sofascore con matching estricto por nombre.
     Nunca devuelve un equipo cuyo nombre no contenga alguna palabra del nombre buscado.
@@ -1072,6 +1130,48 @@ def sofascore_match(home: str, away: str) -> str:
     return "\n".join(lines)
 
 
+def _tavily_for_params(params: dict, tavily_key: str) -> str:
+    """
+    Construye la query de Tavily según el tipo de búsqueda.
+    Solo dominios de estadísticas — sin noticias.
+    """
+    tipo = params["type"]
+    fmt  = params.get("format", "")
+
+    if tipo == "jugador":
+        name = params["player"]
+        if fmt in ("temporada", "cronica", "ficha", "scouting", "tactico"):
+            query = f"{name} estadísticas temporada 2024 2025 goles asistencias partidos"
+        elif fmt in ("historico", "perfil"):
+            query = f"{name} carrera estadísticas históricas clubes transferencias"
+        else:
+            query = f"{name} estadísticas fútbol"
+
+    elif tipo == "equipo":
+        name = params["team"]
+        if fmt == "temporada":
+            query = f"{name} tabla posiciones estadísticas temporada 2024 2025"
+        elif fmt == "resultados":
+            query = f"{name} últimos resultados partidos marcadores 2025"
+        elif fmt == "proximos":
+            query = f"{name} próximos partidos fixture 2025"
+        elif fmt in ("entrenador", "dt_historico"):
+            query = f"{name} entrenador estadísticas partidos dirigidos"
+        else:
+            query = f"{name} estadísticas fútbol 2025"
+
+    elif tipo == "partido":
+        query = f"{params['home']} vs {params['away']} estadísticas resultado"
+
+    else:
+        query = params.get("prompt", "")
+
+    if not query:
+        return ""
+
+    return tavily_search(query, tavily_key, max_results=4)
+
+
 def scrape_context(params: dict) -> tuple[str, list[str]]:
     parts, sources = [], []
     tipo = params["type"]
@@ -1182,106 +1282,180 @@ def scrape_context(params: dict) -> tuple[str, list[str]]:
 # ══════════════════════════════════════════════════════════════════════════════
 
 FORMATS_PLAYER = {
-    "temporada":  "un informe detallado de la temporada en curso: estadísticas actualizadas, rendimiento partido a partido, racha de forma, goles y asistencias, minutos jugados, rating promedio y proyección de cierre de temporada",
-    "historico":  "un repaso histórico completo: trayectoria por clubes, títulos, estadísticas de carrera, hitos y récords personales, comparativa con grandes referentes de su posición y legado hasta hoy",
-    "scouting":   "un scouting report profesional: perfil físico y técnico, sistema de juego ideal, fortalezas defensivas y ofensivas, debilidades a explotar, valoración de mercado y proyección futura",
-    "tactico":    "un análisis táctico en profundidad: zonas de influencia, movimientos sin balón, pressing, transiciones, relación con compañeros, cómo condiciona el juego del equipo",
-    "ficha":      "una ficha periodística completa (posición, club, estilo de juego, fortalezas, debilidades, momento actual, estadísticas recientes, dato destacado)",
-    "perfil":     "un perfil biográfico humano (origen, infancia, carrera, hitos, personalidad, vida fuera del campo, legado)",
-    "lead":       "un lead de apertura de nota (máximo 60 palabras, que enganche al lector desde la primera línea)",
-    "tweet":      "un hilo de Twitter/X de 6 tweets numerados con emojis, pensado para viralizar",
-    "radio":      "un texto de 90 segundos de radio, con ritmo oral y sin tecnicismos visuales",
-    "cronica":    "una crónica de rendimiento reciente (forma actual, últimas actuaciones, estadísticas, perspectivas)",
+    "temporada": "ficha de temporada",
+    "historico": "ficha histórica",
+    "scouting":  "scouting report",
+    "tactico":   "análisis táctico",
+    "ficha":     "ficha completa",
+    "perfil":    "perfil biográfico",
+    "lead":      "lead de nota (máx 60 palabras)",
+    "tweet":     "hilo Twitter/X (6 tweets con emojis)",
+    "radio":     "texto radio (90 segundos)",
+    "cronica":   "crónica de rendimiento",
 }
 FORMATS_MATCH = {
-    "cronica":    "una crónica completa del partido",
-    "prepartido": "una previa del partido (contexto, claves tácticas, jugadores a seguir, pronóstico)",
-    "flash":      "un flash de resultado en exactamente 80 palabras",
-    "analisis":   "un análisis táctico (sistemas, presión, transiciones, puntos de quiebre)",
-    "tweet":      "un hilo de Twitter/X de 5-7 tweets numerados con emojis",
+    "cronica":    "crónica del partido",
+    "prepartido": "previa del partido",
+    "flash":      "flash de resultado (80 palabras exactas)",
+    "analisis":   "análisis táctico",
+    "tweet":      "hilo Twitter/X (5-7 tweets)",
 }
 FORMATS_TEAM = {
-    "temporada":   "un informe completo de la temporada actual: posición en tabla, estadísticas del equipo, racha de forma y análisis del momento",
-    "resultados":  "una crónica de los últimos 5 resultados: qué pasó en cada partido, tendencias, rendimiento local/visitante y racha actual",
-    "proximos":    "una previa de los próximos 5 partidos: rivales, contexto, dificultad de la agenda, claves tácticas y pronóstico",
-    "entrenador":  "un perfil del entrenador actual: temporada en curso, sistema de juego, decisiones tácticas, rendimiento y vínculo con el plantel",
-    "dt_historico":"un repaso histórico del entrenador: carrera como DT, clubes dirigidos, títulos, filosofía de juego y legado",
+    "temporada":   "ficha de temporada",
+    "resultados":  "reporte de últimos 5 resultados",
+    "proximos":    "agenda de próximos 5 partidos",
+    "entrenador":  "ficha del entrenador (temporada actual)",
+    "dt_historico":"ficha histórica del entrenador",
+}
+
+FORMAT_INSTRUCTIONS = {
+    "temporada": (
+        "Producí una FICHA DE TEMPORADA con esta estructura exacta:\n"
+        "**[Nombre] — Temporada [año]**\n"
+        "Club: | Posición: | Edad:\n"
+        "Partidos: | Goles: | Asistencias: | Minutos: | Rating:\n"
+        "Últimos 5 partidos: (lista)\n"
+        "Valor de mercado: | Contrato hasta:\n"
+        "Análisis: (2 líneas máximo, solo si los datos lo justifican)\n\n"
+        "REGLA: Completá solo campos con datos verificados. Sin dato → 'n/d'. NO inventes."
+    ),
+    "historico": (
+        "Producí una FICHA HISTÓRICA con esta estructura exacta:\n"
+        "**[Nombre] — Carrera**\n"
+        "Nacimiento: | Nacionalidad: | Posición:\n"
+        "Clubes: (lista cronológica con años)\n"
+        "Estadísticas carrera: Partidos: | Goles: | Asistencias:\n"
+        "Selección: Partidos: | Goles: | Títulos:\n"
+        "Palmarés: (lista con año)\n"
+        "Valor pico: | Valor actual:\n\n"
+        "REGLA: Solo datos verificados. Sin dato → 'n/d'. Máximo 250 palabras."
+    ),
+    "scouting": (
+        "Producí un SCOUTING REPORT con esta estructura:\n"
+        "**[Nombre] — Scouting**\n"
+        "Posición: | Edad: | Pie: | Altura: | Valor: | Contrato:\n"
+        "Stats temporada actual: (lista breve)\n"
+        "Fortalezas: (3 puntos con datos)\n"
+        "Debilidades: (2 puntos con datos)\n"
+        "Veredicto: (1 línea)\n\n"
+        "REGLA: Solo afirmaciones con datos. Máximo 200 palabras."
+    ),
+    "tactico": (
+        "Producí un ANÁLISIS TÁCTICO de máximo 120 palabras.\n"
+        "Estructura: posición → zonas → movimientos clave → impacto en equipo.\n"
+        "Solo datos provistos. Sin generalidades."
+    ),
+    "ficha": (
+        "Producí una FICHA en formato compacto:\n"
+        "**[Nombre]** | [Club] | [Posición]\n"
+        "Stats clave + valor + contrato + 1 dato destacado.\n"
+        "Máximo 80 palabras. Solo datos verificados."
+    ),
+    "perfil": (
+        "Producí un PERFIL BIOGRÁFICO de máximo 180 palabras.\n"
+        "Estructura: origen → carrera → hito → momento actual.\n"
+        "Solo hechos verificables. No inventes anécdotas."
+    ),
+    "lead": "Escribí un LEAD de 50-60 palabras exactas. Solo datos reales provistos.",
+    "tweet": "Escribí 6 TWEETS numerados con emojis. Máx 280 caracteres c/u. Solo datos reales.",
+    "radio": "Escribí TEXTO RADIO de ≈180 palabras (90 segundos). Ritmo oral. Solo datos reales.",
+    "cronica": (
+        "Producí una CRÓNICA DE RENDIMIENTO de máximo 130 palabras.\n"
+        "Estructura: forma actual → últimas actuaciones → stats → perspectiva.\n"
+        "Solo datos verificados."
+    ),
+    "resultados": (
+        "Producí un REPORTE DE RESULTADOS:\n"
+        "**[Equipo] — Últimos 5 partidos**\n"
+        "(lista: fecha | G/E/P | marcador | rival | competencia)\n"
+        "Balance: G: E: P: GF: GC:\n"
+        "Racha: (1 línea)\n\n"
+        "REGLA: Solo los datos que tenés. Sin datos → indicalo."
+    ),
+    "proximos": (
+        "Producí una AGENDA DE PARTIDOS:\n"
+        "**[Equipo] — Próximos partidos**\n"
+        "(lista: fecha | hora | local vs visitante | competencia)\n"
+        "Partido clave: (1 línea sobre el más importante)\n\n"
+        "REGLA: Solo los datos que tenés."
+    ),
+    "temporada_equipo": (
+        "Producí una FICHA DE TEMPORADA DEL EQUIPO:\n"
+        "**[Equipo] — Temporada [año]**\n"
+        "Liga: | Entrenador: | Pos en tabla:\n"
+        "PJ: | G: | E: | P: | GF: | GC: | Pts:\n"
+        "Valor del plantel:\n"
+        "Últimos 5: (lista breve)\n"
+        "Próximos 2: (lista breve)\n"
+        "Análisis: (2 líneas máximo)\n\n"
+        "REGLA: Solo datos verificados. Máximo 200 palabras."
+    ),
+    "entrenador": (
+        "Producí una FICHA DEL ENTRENADOR:\n"
+        "**[Nombre] — [Club]**\n"
+        "Nacionalidad: | Edad: | En el club desde:\n"
+        "Temporada: PJ: | G: | E: | P: | % victorias:\n"
+        "Sistema: | Estilo:\n"
+        "Análisis: (2 líneas con datos)\n\n"
+        "REGLA: Solo datos verificados. Máximo 150 palabras."
+    ),
+    "dt_historico": (
+        "Producí una FICHA HISTÓRICA DEL DT:\n"
+        "**[Nombre] — Carrera como DT**\n"
+        "Nacionalidad: | Edad:\n"
+        "Clubes: (lista cronológica con años y win%)\n"
+        "Títulos: (lista)\n"
+        "Análisis: (2 líneas)\n\n"
+        "REGLA: Solo datos verificados. Máximo 200 palabras."
+    ),
 }
 
 
 def build_prompt(p: dict, scraped_ctx: str) -> tuple[str, str]:
-    fecha_hoy    = hoy()
-    temporada    = temporada_vigente()
+    fecha_hoy = hoy()
+    temporada = temporada_vigente()
 
     sys_prompt = (
-        "Sos un periodista deportivo argentino senior con 20 años de experiencia. "
-        "Escribís para medios de primer nivel. Tu prosa es precisa, atractiva y refleja "
-        "profundo conocimiento del deporte. Usás español rioplatense de forma natural.\n\n"
-        "REGLAS ESTRICTAS ANTI-ALUCINACIÓN (son innegociables):\n"
-        "1. SOLO usás estadísticas, fechas, resultados y cifras que aparezcan EXPLÍCITAMENTE "
-        "en los datos scrapeados que te pasan. NUNCA inventés ni aproximés números.\n"
-        "2. Si un dato no está en los datos provistos, escribís alrededor de él con criterio "
-        "periodístico: describís el fenómeno, el impacto, el contexto, pero NO ponés números inventados.\n"
-        "3. Si los datos son insuficientes para un punto específico, omitís ese punto. "
-        "Prefierís un texto más corto y preciso que uno largo con datos falsos.\n"
-        "4. Nunca usás frases como 'aproximadamente', 'alrededor de', 'se estima' para cifras "
-        "deportivas. Si no sabés el número exacto, no lo ponés.\n"
-        "5. Los datos scrapeados son la ÚNICA fuente de verdad para estadísticas. "
-        "Tu conocimiento de entrenamiento puede usarse para CONTEXTO (comparaciones, análisis) "
-        "pero NUNCA para estadísticas específicas como goles, partidos, fechas exactas.\n\n"
-        f"CONTEXTO TEMPORAL:\n"
-        f"- Fecha de hoy: {fecha_hoy}\n"
-        f"- Temporada vigente: {temporada}\n"
-        f"- Priorizá datos de la temporada en curso. Si los datos son de temporadas anteriores, "
-        f"mencionalo claramente en el texto."
+        "Sos un periodista deportivo argentino. Respondés BREVE y ESTRUCTURADO.\n\n"
+        "REGLAS (innegociables):\n"
+        "1. Usá SOLO los datos del bloque DATOS VERIFICADOS para estadísticas y cifras.\n"
+        "2. Sin dato verificado → escribí 'n/d'. NUNCA inventes ni rellenes.\n"
+        "3. Preferís corto y preciso. Sin prosa vacía.\n"
+        "4. Menos datos = output más corto, no más largo.\n"
+        "5. Nunca: 'se estima', 'aproximadamente', 'según fuentes'.\n\n"
+        f"Fecha: {fecha_hoy} | Temporada: {temporada}"
     )
-    ctx_parts = []
+
+    ctx_block = ""
     if scraped_ctx.strip():
-        ctx_parts.append(
-            f"═══ DATOS VERIFICADOS (scrapeados {fecha_hoy}) ═══\n"
-            f"IMPORTANTE: Usá SOLO las estadísticas de esta sección. No agregues números de tu conocimiento.\n\n"
-            f"{scraped_ctx}\n"
-            f"═══ FIN DE DATOS VERIFICADOS ═══"
-        )
+        ctx_block = f"═══ DATOS VERIFICADOS ═══\n{scraped_ctx}\n═══ FIN ═══"
     manual = p.get("context", "").strip()
     if manual:
-        ctx_parts.append(f"DATOS ADICIONALES DEL PERIODISTA:\n{manual}")
-    ctx_block = "\n\n".join(ctx_parts)
+        ctx_block += f"\n\nDATOS EXTRA DEL PERIODISTA:\n{manual}"
 
     tipo = p["type"]
+    fmt  = p.get("format", "")
+    fmt_key = "temporada_equipo" if (tipo == "equipo" and fmt == "temporada") else fmt
+
+    instruccion = FORMAT_INSTRUCTIONS.get(fmt_key, f"Generá una {fmt} breve con datos.")
+
     if tipo == "jugador":
-        user = (
-            f"Generá {FORMATS_PLAYER.get(p['format'], p['format'])} "
-            f"sobre **{p['player']}**. "
-            f"Enfocate en su estado actual y la temporada {temporada}."
-        )
+        subject = f"JUGADOR: {p['player']}"
     elif tipo == "partido":
         score = f" (resultado: {p['score']})" if p.get("score") else ""
-        user = (
-            f"Generá {FORMATS_MATCH.get(p['format'], p['format'])} "
-            f"del partido **{p['home']} vs {p['away']}**{score} · {p['comp']}. "
-            f"Fecha de consulta: {fecha_hoy}."
-        )
+        subject = f"PARTIDO: {p['home']} vs {p['away']}{score} — {p['comp']}"
     elif tipo == "equipo":
-        fmt_desc = FORMATS_TEAM.get(p["format"], p["format"])
-        if p["format"] in ("entrenador", "dt_historico"):
-            user = (
-                f"Generá {fmt_desc} "
-                f"del equipo **{p['team']}**. "
-                f"Fecha: {fecha_hoy}. Usá los datos del entrenador scrapeados."
-            )
-        else:
-            user = (
-                f"Generá {fmt_desc} "
-                f"sobre **{p['team']}**. "
-                f"Enfocate en la temporada vigente ({temporada}) y el momento actual ({fecha_hoy})."
-            )
+        subject = f"EQUIPO: {p['team']}"
     else:
-        user = p.get("prompt", "")
+        subject = ""
 
     if ctx_block:
-        user += f"\n\n{ctx_block}"
+        user = f"{instruccion}\n\n{subject}\n\n{ctx_block}"
+    else:
+        user = f"{instruccion}\n\n{subject}\n\n[Sin datos scrapeados — indicá qué falta]"
+
     return sys_prompt, user
+
 
 
 def get_label(p: dict) -> str:
@@ -1291,7 +1465,7 @@ def get_label(p: dict) -> str:
     return (p.get("prompt") or "")[:45] + "…"
 
 
-def generate(params: dict, api_key: str, do_scrape: bool):
+def generate(params: dict, api_key: str, do_scrape: bool, tavily_key: str = ""):
     if not api_key:
         st.error("⚠️ Ingresá tu API key en la barra lateral.")
         return
@@ -1299,8 +1473,18 @@ def generate(params: dict, api_key: str, do_scrape: bool):
     scraped_ctx, sources = "", []
 
     if do_scrape:
-        with st.spinner("🌐 Scrapeando datos (Sofascore · Wikipedia · DuckDuckGo)…"):
+        with st.spinner("🌐 Obteniendo datos (Sofascore · Transfermarkt · Wikipedia)…"):
             scraped_ctx, sources = scrape_context(params)
+
+        # Tavily como capa adicional de stats (si hay key)
+        if tavily_key:
+            with st.spinner("🔍 Buscando stats adicionales (Tavily)…"):
+                tav = _tavily_for_params(params, tavily_key)
+                if tav:
+                    scraped_ctx = scraped_ctx + "\n\n" + tav if scraped_ctx else tav
+                    if "Tavily" not in sources:
+                        sources.append("Tavily Stats")
+
         if scraped_ctx:
             preview = scraped_ctx.replace("\n", "<br>")
             st.markdown(
@@ -1318,7 +1502,7 @@ def generate(params: dict, api_key: str, do_scrape: bool):
         try:
             response = client.messages.create(
                 model="claude-sonnet-4-5",
-                max_tokens=1500,
+                max_tokens=1000,
                 system=sys_prompt,
                 messages=[{"role": "user", "content": user_prompt}],
             )
@@ -1361,16 +1545,14 @@ def generate(params: dict, api_key: str, do_scrape: bool):
 # SIDEBAR
 # ══════════════════════════════════════════════════════════════════════════════
 with st.sidebar:
-    st.markdown("### 🔑 API Key")
-
-    # Si hay secret configurado en el deploy, no mostrar el input
+    st.markdown("### 🔑 Anthropic API Key")
     has_secret = bool(st.secrets.get("ANTHROPIC_API_KEY", ""))
     if has_secret:
-        st.success("✓ API key configurada en Secrets")
+        st.success("✓ Configurada en Secrets")
         api_key_input = ""
     else:
         api_key_input = st.text_input(
-            "API Key de Anthropic", type="password", placeholder="sk-ant-api03-…",
+            "Anthropic Key", type="password", placeholder="sk-ant-api03-…",
             label_visibility="collapsed",
             help="Ingresá tu API key de Anthropic"
         )
@@ -1379,20 +1561,44 @@ with st.sidebar:
                 st.success("✓ Key lista")
             else:
                 st.error("⚠ Debe empezar con sk-ant-")
-        st.markdown("[↗ Obtener key gratis](https://console.anthropic.com/settings/keys)")
+        st.markdown("[↗ Obtener key](https://console.anthropic.com/settings/keys)")
 
     api_key = get_api_key(api_key_input)
 
     st.divider()
-    st.markdown("### 🌐 Datos en tiempo real")
+    st.markdown("### 📊 Tavily Stats")
+    st.caption("Búsqueda en sitios de estadísticas (fbref, transfermarkt, sofascore, etc.)")
+
+    has_tavily_secret = bool(st.secrets.get("TAVILY_API_KEY", ""))
+    if has_tavily_secret:
+        st.success("✓ Configurada en Secrets")
+        tavily_key_input = ""
+    else:
+        tavily_key_input = st.text_input(
+            "Tavily Key", type="password", placeholder="tvly-…",
+            label_visibility="collapsed",
+            help="Opcional. Mejora la calidad de datos stats."
+        )
+        if tavily_key_input:
+            st.success("✓ Tavily activo")
+        st.markdown("[↗ Key gratuita (1000/mes)](https://app.tavily.com)")
+
+    tavily_key = get_tavily_key(tavily_key_input)
+
+    if tavily_key:
+        st.caption("🔍 fbref · transfermarkt · sofascore\nflashscore · soccerway · whoscored\npromiedos · bdfa")
+
+    st.divider()
+    st.markdown("### 🌐 Scraping gratuito")
     do_scrape = st.toggle(
-        "Scraping gratuito", value=True,
-        help="Busca datos reales gratis antes de generar. Sin costo extra.",
+        "Activar scraping", value=True,
+        help="Sofascore API + Wikipedia + Transfermarkt API. Sin costo extra.",
     )
     if do_scrape:
-        st.caption("✅ Sofascore API\n✅ Wikipedia\n✅ DuckDuckGo")
+        st.caption("✅ Sofascore API\n✅ Transfermarkt API\n✅ Wikipedia")
     else:
         st.caption("Solo IA, sin datos externos")
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TABS
@@ -1433,7 +1639,7 @@ with tab_jugador:
             generate(
                 {"type": "jugador", "player": player, "format": fmt_player,
                  "context": ctx_player},
-                api_key, do_scrape,
+                api_key, do_scrape, tavily_key,
             )
 
 # ── PARTIDO ────────────────────────────────────────────────────────────────────
@@ -1473,7 +1679,7 @@ with tab_partido:
             generate(
                 {"type": "partido", "home": home, "away": away, "score": score,
                  "comp": comp, "format": fmt_match, "context": ctx_match},
-                api_key, do_scrape,
+                api_key, do_scrape, tavily_key,
             )
 
 # ── EQUIPO ─────────────────────────────────────────────────────────────────────
@@ -1503,7 +1709,7 @@ with tab_equipo:
             generate(
                 {"type": "equipo", "team": team, "format": fmt_team,
                  "context": ctx_team},
-                api_key, do_scrape,
+                api_key, do_scrape, tavily_key,
             )
 
 # ── LIBRE ──────────────────────────────────────────────────────────────────────
@@ -1538,7 +1744,7 @@ with tab_libre:
         if not libre_text.strip():
             st.warning("Escribí tu consulta.")
         else:
-            generate({"type": "libre", "prompt": libre_text.strip()}, api_key, do_scrape)
+            generate({"type": "libre", "prompt": libre_text.strip()}, api_key, do_scrape, tavily_key)
 
 # ── HISTORIAL ──────────────────────────────────────────────────────────────────
 with tab_historial:
